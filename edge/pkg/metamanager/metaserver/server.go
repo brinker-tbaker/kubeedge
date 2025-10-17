@@ -168,8 +168,8 @@ func (ls *MetaServer) BuildBasicHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
 		reqInfo, ok := apirequest.RequestInfoFrom(ctx)
-		// klog.Infof("[metaserver]get a req(%v)(%v)", reqInfo.Path, reqInfo.Verb)
-		// klog.Infof("[metaserver]get a req(\nPath:%v; \nVerb:%v; \nHeader:%+v)", reqInfo.Path, reqInfo.Verb, req.Header)
+		klog.Infof("[metaserver]get a req(%v)(%v)", reqInfo.Path, reqInfo.Verb)
+		klog.Infof("[metaserver]get a req(\nPath:%v; \nVerb:%v; \nHeader:%+v)", reqInfo.Path, reqInfo.Verb, req.Header)
 		if !ok {
 			err := fmt.Errorf("invalid request")
 			responsewriters.ErrorNegotiated(apierrors.NewInternalError(err), ls.NegotiatedSerializer, schema.GroupVersion{}, w, req)

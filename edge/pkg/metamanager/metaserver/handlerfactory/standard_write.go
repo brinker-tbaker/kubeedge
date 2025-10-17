@@ -37,19 +37,56 @@ import (
 
 	"github.com/kubeedge/kubeedge/edge/pkg/metamanager/metaserver/kubernetes/fakers"
 	"github.com/kubeedge/kubeedge/edge/pkg/metamanager/metaserver/kubernetes/scope"
+	"github.com/kubeedge/kubeedge/edge/pkg/metamanager/metaserver/kubernetes/storage"
 	"github.com/kubeedge/kubeedge/pkg/metaserver"
 	"github.com/kubeedge/kubeedge/pkg/metaserver/util"
 )
 
 func (f *Factory) Create(req *request.RequestInfo) http.Handler {
-	s := scope.NewRequestScope()
-	s.Kind = schema.GroupVersionKind{
+	scope := wrapScope{RequestScope: scope.NewRequestScope()}
+	scope.Kind = schema.GroupVersionKind{
 		Group:   req.APIGroup,
 		Version: req.APIVersion,
 		Kind:    util.UnsafeResourceToKind(req.Resource),
 	}
-	h := handlers.CreateResource(f.storage, s, fakers.NewAlwaysAdmit())
-	return h
+	h := func(w http.ResponseWriter, req *http.Request) {
+		timeout := parseTimeout(req.URL.Query().Get("timeout"))
+		ctx, cancel := context.WithTimeout(req.Context(), timeout)
+		defer cancel()
+
+		createBytes, err := limitedReadBody(req, scope.MaxRequestBodyBytes)
+		if err != nil {
+			scope.err(err, w, req)
+			return
+		}
+
+		options := &metav1.CreateOptions{}
+		if err := metainternalversionscheme.ParameterCodec.DecodeParameters(req.URL.Query(), scope.MetaGroupVersion, options); err != nil {
+			err = errors.NewBadRequest(err.Error())
+			scope.err(err, w, req)
+			return
+		}
+		if errs := validation.ValidateCreateOptions(options); len(errs) > 0 {
+			err := errors.NewInvalid(schema.GroupKind{Group: metav1.GroupName, Kind: "CreateOptions"}, "", errs)
+			scope.err(err, w, req)
+			return
+		}
+		options.TypeMeta.SetGroupVersionKind(metav1.SchemeGroupVersion.WithKind("CreateOptions"))
+
+		obj, err := storage.DecodeAndConvert(createBytes, scope.Kind.Group)
+		if err != nil {
+			scope.err(err, w, req)
+			return
+		}
+
+		retObj, err := f.storage.Create(ctx, obj, nil, options)
+		if err != nil {
+			scope.err(err, w, req)
+			return
+		}
+		responsewriters.WriteObjectNegotiated(scope.Serializer, scope, scope.Kind.GroupVersion(), w, req, 200, retObj, false)
+	}
+	return http.HandlerFunc(h)
 }
 
 func (f *Factory) Update(req *request.RequestInfo) http.Handler {
