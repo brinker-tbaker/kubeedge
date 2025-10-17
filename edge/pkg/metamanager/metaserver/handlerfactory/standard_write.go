@@ -33,6 +33,7 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/handlers"
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 	"k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/klog/v2"
 
 	"github.com/kubeedge/kubeedge/edge/pkg/metamanager/metaserver/kubernetes/fakers"
@@ -94,14 +95,51 @@ func (f *Factory) Update(req *request.RequestInfo) http.Handler {
 		h := updateEdgeDevice()
 		return h
 	}
-	s := scope.NewRequestScope()
-	s.Kind = schema.GroupVersionKind{
+	scope := wrapScope{RequestScope: scope.NewRequestScope()}
+	scope.Kind = schema.GroupVersionKind{
 		Group:   req.APIGroup,
 		Version: req.APIVersion,
 		Kind:    util.UnsafeResourceToKind(req.Resource),
 	}
-	h := handlers.UpdateResource(f.storage, s, fakers.NewAlwaysAdmit())
-	return h
+	h := func(w http.ResponseWriter, req *http.Request) {
+		timeout := parseTimeout(req.URL.Query().Get("timeout"))
+		ctx, cancel := context.WithTimeout(req.Context(), timeout)
+		defer cancel()
+
+		createBytes, err := limitedReadBody(req, scope.MaxRequestBodyBytes)
+		if err != nil {
+			scope.err(err, w, req)
+			return
+		}
+
+		options := &metav1.UpdateOptions{}
+		if err := metainternalversionscheme.ParameterCodec.DecodeParameters(req.URL.Query(), scope.MetaGroupVersion, options); err != nil {
+			err = errors.NewBadRequest(err.Error())
+			scope.err(err, w, req)
+			return
+		}
+		if errs := validation.ValidateUpdateOptions(options); len(errs) > 0 {
+			err := errors.NewInvalid(schema.GroupKind{Group: metav1.GroupName, Kind: "UpdateOptions"}, "", errs)
+			scope.err(err, w, req)
+			return
+		}
+		options.TypeMeta.SetGroupVersionKind(metav1.SchemeGroupVersion.WithKind("UpdateOptions"))
+
+		obj, err := storage.DecodeAndConvert(createBytes, scope.Kind.Group)
+		if err != nil {
+			scope.err(err, w, req)
+			return
+		}
+
+		objInfo := rest.DefaultUpdatedObjectInfo(obj)
+		retObj, _, err := f.storage.Update(ctx, "", objInfo, nil, nil, false, options)
+		if err != nil {
+			scope.err(err, w, req)
+			return
+		}
+		responsewriters.WriteObjectNegotiated(scope.Serializer, scope, scope.Kind.GroupVersion(), w, req, 200, retObj, false)
+	}
+	return http.HandlerFunc(h)
 }
 
 func (f *Factory) Delete() http.Handler {
