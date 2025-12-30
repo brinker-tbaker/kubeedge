@@ -108,6 +108,23 @@ func (r *REST) Get(ctx context.Context, _ string, options *metav1.GetOptions) (r
 		err = r.Agent.Apply(app)
 		defer app.Close()
 		if err != nil {
+			if errors.IsNotFound(err) {
+				// cloud said object should not exist, but it may still exist locally (e.g. leases) so perform cleanup then re-emmit the error
+				tempObj := &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": info.APIVersion,
+						"kind":       util.UnsafeResourceToKind(info.Resource),
+						"metadata": map[string]interface{}{
+							"name":      info.Name,
+							"namespace": info.Namespace,
+						},
+					},
+				}
+				if err := imitator.DefaultV2Client.DeleteObj(context.TODO(), tempObj); err != nil {
+					klog.Warningf("[metaserver/reststorage] failed to delete obj from metav2, err: %v", err)
+				}
+				return nil, err
+			}
 			klog.Errorf("[metaserver/reststorage] failed to get obj from cloud: %v", err)
 			return nil, err
 		}
@@ -125,7 +142,7 @@ func (r *REST) Get(ctx context.Context, _ string, options *metav1.GetOptions) (r
 	}()
 
 	// If we get object from cloud failed, try to get the object from the local metaManager
-	if err != nil {
+	if err != nil && !errors.IsNotFound(err) {
 		obj, err = r.Store.Get(ctx, "", options) // name is needless, we get all key information from ctx
 		if err != nil {
 			return nil, errors.NewNotFound(schema.GroupResource{Group: info.APIGroup, Resource: info.Resource}, info.Name)
